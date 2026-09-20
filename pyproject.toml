@@ -1,0 +1,9 @@
+[project]
+name = "comfyui-minimax-h3-image-lane"
+description = "T=1 MiniMax H3 image nodes. Stock video nodes stay unpatched."
+version = "0.1.0"
+license = { text = "Apache-2.0" }
+
+[tool.comfy]
+PublisherId = "local"
+DisplayName = "MiniMax H3 Image Lane"
