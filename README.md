@@ -20,7 +20,7 @@ stock nodes untouched.
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/johndpope/ComfyUI-MiniMax-H3-Image-Lane.git
+git clone https://github.com/scrya-com/ComfyUI-MiniMax-H3-Image-Lane.git
 ```
 
 Restart Comfy. Search the menu for **`minimax-image`**.
@@ -52,8 +52,26 @@ restores it. Video graphs keep snapping `length=1` → 5 frames / T′=2.
 
 ## Level-of-Token (LoT) for stills and video — research
 
+Gallery, weight links, and the training call: **[scrya.com/lot](https://scrya.com/lot)**.
+
 > [!WARNING]
 > **⚠️ THIS MODEL NEEDS MORE TRAINING — HELP WANTED.** LoT output is still visibly softer than dense H3 (blocking at the edges, smeared hair). The pipeline works; the weights need more training. Join in: **[shootthesound/Fizgig discussions #183](https://github.com/shootthesound/Fizgig/discussions/183)**.
+
+![ComfyUI still, dense versus LoT center](assets/lot-h3-comfyui-center-vs-dense.png)
+
+768×1152 still, same seed. Dense + LoRA at 4.1 it/s. LoT `center` (300 of 864 tokens) at 5.6 it/s. Generated, softer at the coarse edges.
+
+![ComfyUI 22-frame clip, dense versus LoT center](assets/lot-h3-comfyui-video-center-vs-dense.png)
+
+512×768, 22 frames, frames 0 / 7 / 14 / 21. Dense + LoRA at 1.33 it/s. LoT `center` at 3.45 it/s. Generated, not a recording of a person.
+
+![Mixed cell sizes on one canvas](assets/lot-mixed-grid.png)
+
+Synthetic 8×8 contract check (checkpoint 14000, one noise seed). This is the mixed-cell idea, not an H3 photograph.
+
+![Early H3 band fit, dense versus unfitted versus fitted](assets/lot-h3-render-bands.png)
+
+768×1152, 20 steps, seeds 0 and 1. Dense stays sharp. The unfitted mean smears. The early fit tears into horizontal bands. That gap is why the weights still need training.
 
 [Level-of-Token diffusion](https://arxiv.org/abs/2610.05816) runs the DiT on fewer, larger tokens where detail is low and recovers the full-resolution velocity afterwards. The VAE latent stays full size.
 
@@ -66,7 +84,7 @@ restores it. Video graphs keep snapping `length=1` → 5 frames / T′=2.
 
 ```bash
 # 1. install (or git pull if you already have the pack)
-cd ComfyUI/custom_nodes && git clone https://github.com/johndpope/ComfyUI-MiniMax-H3-Image-Lane.git && cd ../..
+cd ComfyUI/custom_nodes && git clone https://github.com/scrya-com/ComfyUI-MiniMax-H3-Image-Lane.git && cd ../..
 # 2. download the LoT adapter + LoRA
 hf download johndpope/MiniMax-H3-LoT run4_nikki_distill/adapter.safetensors run4_nikki_distill/lora.safetensors --local-dir /tmp/lot
 mkdir -p ComfyUI/models/lot
