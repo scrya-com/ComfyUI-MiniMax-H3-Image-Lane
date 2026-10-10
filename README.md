@@ -62,6 +62,22 @@ restores it. Video graphs keep snapping `length=1` → 5 frames / T′=2.
 | **MiniMax H3 LoT Apply (research)** | MODEL → MODEL + `lot`. Adds a diffusion-model wrapper that runs Comfy's own H3 forward with the *target* rows as a LoT layout. Text, keyframe/reference rows, audio and blocks are stock. Layouts: `center` (fine in the middle, coarse at the edges: portraits), `bands`, `uniform2`, `uniform4`, `dense` (A/B; reproduces the stock forward exactly). |
 | **MiniMax H3 LoT Unscale Latent** | **Required before VAE Decode.** The adapter samples in LoT's scaled latent space; this maps the result back. |
 
+### Quick start: download → test → validate timing → train
+
+```bash
+# 1. install (or git pull if you already have the pack)
+cd ComfyUI/custom_nodes && git clone https://github.com/johndpope/ComfyUI-MiniMax-H3-Image-Lane.git && cd ../..
+# 2. download the LoT adapter + LoRA
+hf download johndpope/MiniMax-H3-LoT run4_nikki_distill/adapter.safetensors run4_nikki_distill/lora.safetensors --local-dir /tmp/lot
+mkdir -p ComfyUI/models/lot
+cp /tmp/lot/run4_nikki_distill/adapter.safetensors ComfyUI/models/lot/run4_nikki_distill_adapter.safetensors
+cp /tmp/lot/run4_nikki_distill/lora.safetensors    ComfyUI/models/loras/minimax_h3_lot_run4_nikki_lora.safetensors
+```
+
+3. **Test:** restart ComfyUI and load `workflows/lot_video_api.json` (22-frame clip) or `workflows/t1_lot_image_api.json` (still). They are API-format JSON: drop them on the canvas, or POST them to `/prompt`. Each one samples the same seed twice: **Sample (LoT)** and **Sample (dense)**.
+4. **Validate the timing:** compare the it/s the console prints for the two sampler runs (LoT runs first). On a 24 GB RTX PRO 4000 Blackwell: clip 3.45 vs 1.33 it/s (**2.6×**), still 5.6 vs 4.1 it/s (1.35×). Set the layout to `dense` for an exact stock A/B. For a per-forward benchmark outside Comfy, use [`time_lot_h3.py`](https://github.com/johndpope/MiniMax-H3/blob/main/scripts/lot/time_lot_h3.py).
+5. **Train your own adapter:** [MiniMax-H3 cheatsheet](https://github.com/johndpope/MiniMax-H3/blob/main/scripts/lot/CHEATSHEET.md) (from your own mp4s: cut, cache, fit, `train_h3.py`, publish). Put the result's `adapter.safetensors` in `models/lot/` and its `lora.safetensors` in `models/loras/`.
+
 **Weights** ([HF johndpope/MiniMax-H3-LoT](https://huggingface.co/johndpope/MiniMax-H3-LoT), MiniMax H3 Community License, **not for use in the EU, UK, South Korea or USA**):
 
 | File | Put in |
