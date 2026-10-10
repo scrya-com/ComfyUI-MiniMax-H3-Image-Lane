@@ -14,7 +14,7 @@ stock nodes untouched.
 | Lane | Nodes | VAE | Length |
 |---|---|---|---|
 | **Video** (stock) | Empty MiniMax H3 AV Latent, Reference to Video | `minimax_h3_video_vae_fp16` | 5, 22, 124… |
-| **Image** (this pack) | Empty MiniMax H3 Image Latent, Reference to Image, Image to Image | [`minimax_h3_t1_image_vae_step1597`](https://huggingface.co/Mamad8/MiniMax-H3-Image-VAE) | always 1 |
+| **Image** (this pack) | Empty MiniMax H3 Image Latent, Reference to Image, Image to Image, LoT Apply / Unscale | [`minimax_h3_t1_image_vae_step1597`](https://huggingface.co/Mamad8/MiniMax-H3-Image-VAE) | always 1 |
 
 ## Install
 
@@ -49,6 +49,34 @@ L1 vs ~0.006).
 
 Each execute temporarily swaps `temporal_shape` on the stock module, then
 restores it. Video graphs keep snapping `length=1` → 5 frames / T′=2.
+
+## Level-of-Token (LoT) on one image — research
+
+> [!WARNING]
+> **⚠️ THIS MODEL NEEDS MORE TRAINING — HELP WANTED.** LoT output is still visibly softer than dense H3 (blocking at the edges, smeared hair). The pipeline works; the weights need more training. Join in: **[shootthesound/Fizgig discussions #183](https://github.com/shootthesound/Fizgig/discussions/183)**.
+
+[Level-of-Token diffusion](https://arxiv.org/abs/2610.05816) runs the DiT on fewer, larger tokens where detail is low and recovers the full-resolution velocity afterwards. The VAE latent stays full size.
+
+| Node | What |
+|---|---|
+| **MiniMax H3 LoT Apply (research)** | MODEL → MODEL + `lot`. Adds a diffusion-model wrapper that runs Comfy's own H3 forward with the *target* rows as a LoT layout. Text, keyframe/reference rows, audio and blocks are stock. Layouts: `center` (fine in the middle, coarse at the edges: portraits), `bands`, `uniform2`, `uniform4`, `dense` (A/B; reproduces the stock forward exactly). |
+| **MiniMax H3 LoT Unscale Latent** | **Required before VAE Decode.** The adapter samples in LoT's scaled latent space; this maps the result back. |
+
+**Weights** ([HF johndpope/MiniMax-H3-LoT](https://huggingface.co/johndpope/MiniMax-H3-LoT), MiniMax H3 Community License, **not for use in the EU, UK, South Korea or USA**):
+
+| File | Put in |
+|---|---|
+| `run4_nikki_distill/adapter.safetensors` | `models/lot/` (created on first start) |
+| `run4_nikki_distill/lora.safetensors` | `models/loras/`, loaded with the stock **LoraLoaderModelOnly** before LoT Apply |
+| FL2VA DiT, **int8 ConvRot** (`minimax_h3_fl2va_pruned_int8_convrot.safetensors`) | `models/diffusion_models/`. The adapters were trained on this base. |
+
+Workflow: `workflows/t1_lot_image_api.json` (API format) samples a 768×1152 still twice from one prompt, LoT `center` and dense, so you can A/B them.
+
+Measured on one RTX PRO 4000 Blackwell (24 GB), 20 steps: dense 4.1 it/s, LoT `center` (300 of 864 tokens) 5.6 it/s. Per still the gain is modest because Comfy's fused kernels already make a dense step fast; the DiT speedup grows with sequence length (2.6× per forward on a 37-frame 768×1344 clip, measured outside Comfy).
+
+Limits: no partial denoise (start from empty noise), no denoise masks (those steps fall back to dense), no PDD multi-head checkpoints. Attention patches that read the packed layout see the dense spans.
+
+`lot_core/` is vendored from [johndpope/MiniMax-H3 `scripts/lot`](https://github.com/johndpope/MiniMax-H3/tree/main/scripts/lot) (see the header of each file for the commit). Training your own adapter: [cheatsheet](https://github.com/johndpope/MiniMax-H3/blob/main/scripts/lot/CHEATSHEET.md).
 
 ## License
 

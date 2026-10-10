@@ -19,6 +19,8 @@ from comfy_extras.nodes_minimax_h3 import (
 )
 import nodes
 
+from .lot_nodes import LOT_NODES
+
 
 def align_frame_count_t1(n):
     if n <= 1:
@@ -169,6 +171,7 @@ class MiniMaxH3ImageLaneExtension(ComfyExtension):
             EmptyMiniMaxH3ImageLatent,
             MiniMaxH3ImageToImage,
             MiniMaxH3ReferenceToImage,
+            *LOT_NODES,
         ]
 
 
