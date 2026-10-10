@@ -7,8 +7,11 @@ afterwards. Text, keyframe/reference rows, audio and the block loop are stock.
 
 The trained adapters sample in LoT's scaled latent space (y = x / s per token
 size), so the sampled latent must go through ``MiniMax H3 LoT Unscale Latent``
-before VAE Decode. Start from empty noise (t2i / t2v); a partial-denoise input
-latent would need the forward scaling, which is not wired here.
+before VAE Decode. Works for T=1 stills (this pack's image nodes) and for video
+clips from the stock H3 nodes (any 17k+5 length; the layout repeats per latent
+frame and the time positions follow H3's own clock). Start from empty noise
+(t2i / t2v / i2v keyframes); a partial-denoise input latent would need the forward
+scaling, which is not wired here.
 
 Adapters and LoRAs: https://huggingface.co/johndpope/MiniMax-H3-LoT
 (``adapter.safetensors`` -> ``models/lot/``; ``lora.safetensors`` -> ``models/loras/``,
@@ -238,10 +241,10 @@ class MiniMaxH3LoTApply(io.ComfyNode):
         return io.Schema(
             node_id="MiniMaxH3LoTApply",
             display_name="MiniMax H3 LoT Apply (research)",
-            category="model/minimax-image",
-            description=("Level-of-Token: run the target with fewer, larger tokens where detail is low. "
-                         "Needs a LoT adapter in models/lot and its LoRA. Research weights; send the latent "
-                         "through LoT Unscale Latent before VAE Decode."),
+            category="model/minimax",
+            description=("Level-of-Token: run the target (still or video clip) with fewer, larger tokens where "
+                         "detail is low. Needs a LoT adapter in models/lot and its LoRA. Research weights; send "
+                         "the latent through LoT Unscale Latent before VAE Decode."),
             inputs=[
                 io.Model.Input("model"),
                 io.Combo.Input("adapter", options=folder_paths.get_filename_list("lot")),
@@ -269,8 +272,8 @@ class MiniMaxH3LoTUnscaleLatent(io.ComfyNode):
         return io.Schema(
             node_id="MiniMaxH3LoTUnscaleLatent",
             display_name="MiniMax H3 LoT Unscale Latent",
-            category="model/latent/minimax-image",
-            description="Map a LoT-sampled latent back to H3's latent space (multiply each token by its extent "
+            category="model/latent/minimax",
+            description="Still or video: map a LoT-sampled latent back to H3's latent space (multiply each token by its extent "
                         "scale) before VAE Decode. Audio is passed through.",
             inputs=[io.Latent.Input("samples"), LotSpec.Input("lot")],
             outputs=[io.Latent.Output()],

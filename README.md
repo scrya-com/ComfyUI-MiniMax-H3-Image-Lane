@@ -50,7 +50,7 @@ L1 vs ~0.006).
 Each execute temporarily swaps `temporal_shape` on the stock module, then
 restores it. Video graphs keep snapping `length=1` → 5 frames / T′=2.
 
-## Level-of-Token (LoT) on one image — research
+## Level-of-Token (LoT) for stills and video — research
 
 > [!WARNING]
 > **⚠️ THIS MODEL NEEDS MORE TRAINING — HELP WANTED.** LoT output is still visibly softer than dense H3 (blocking at the edges, smeared hair). The pipeline works; the weights need more training. Join in: **[shootthesound/Fizgig discussions #183](https://github.com/shootthesound/Fizgig/discussions/183)**.
@@ -70,9 +70,23 @@ restores it. Video graphs keep snapping `length=1` → 5 frames / T′=2.
 | `run4_nikki_distill/lora.safetensors` | `models/loras/`, loaded with the stock **LoraLoaderModelOnly** before LoT Apply |
 | FL2VA DiT, **int8 ConvRot** (`minimax_h3_fl2va_pruned_int8_convrot.safetensors`) | `models/diffusion_models/`. The adapters were trained on this base. |
 
-Workflow: `workflows/t1_lot_image_api.json` (API format) samples a 768×1152 still twice from one prompt, LoT `center` and dense, so you can A/B them.
+Workflows (API format), each sampling the same seed twice, LoT `center` and dense, so you can A/B:
 
-Measured on one RTX PRO 4000 Blackwell (24 GB), 20 steps: dense 4.1 it/s, LoT `center` (300 of 864 tokens) 5.6 it/s. Per still the gain is modest because Comfy's fused kernels already make a dense step fast; the DiT speedup grows with sequence length (2.6× per forward on a 37-frame 768×1344 clip, measured outside Comfy).
+| Workflow | Target | Nodes |
+|---|---|---|
+| `workflows/t1_lot_image_api.json` | 768×1152 still (T=1) | this pack's Image to Image + Image VAE |
+| `workflows/lot_video_api.json` | 512×768, 22-frame clip | stock **MiniMax H3 Image to Video** (t2va; add `first_frame` for i2va) + video VAE |
+
+LoT Apply works with any H3 target length: the layout repeats on every latent frame and the time positions follow H3's own clock. Keyframe and reference rows stay dense.
+
+Measured in Comfy on one RTX PRO 4000 Blackwell (24 GB), 20 steps:
+
+| Target | Dense | LoT `center` | Per step |
+|---|---|---|---|
+| 768×1152 still (300 of 864 tokens) | 4.1 it/s | 5.6 it/s | 1.35× |
+| 512×768, 22 frames (7 latent frames) | 1.33 it/s | 3.45 it/s | **2.6×** |
+
+The gain grows with sequence length: Comfy's fused kernels make short dense steps cheap. Quality is below dense, with soft or blocky edges where tokens are coarse; on the clip the face (fine tokens) stays readable and moves with the line.
 
 Limits: no partial denoise (start from empty noise), no denoise masks (those steps fall back to dense), no PDD multi-head checkpoints. Attention patches that read the packed layout see the dense spans.
 
