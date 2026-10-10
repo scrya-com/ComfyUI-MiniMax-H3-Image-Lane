@@ -29,6 +29,7 @@ import comfy.model_management
 import comfy.model_prefetch
 import comfy.patcher_extension
 import folder_paths
+import nodes
 from comfy.ldm.minimax.model import (
     AUDIO_COND_TIMESTEP,
     VISUAL_COND_TIMESTEP,
@@ -45,6 +46,7 @@ from comfy_api.latest import io
 
 from .lot_core.h3 import GRID_LAYOUTS, grid_layout, make_h3_adapter
 from .lot_core.h3_splice import LotSplice
+from .lot_core import layout_sources as sources
 
 log = logging.getLogger(__name__)
 
@@ -53,21 +55,43 @@ os.makedirs(LOT_DIR, exist_ok=True)
 folder_paths.add_model_folder_path("lot", LOT_DIR)
 WRAPPER_KEY = "minimax_h3_lot"
 LotSpec = io.Custom("MINIMAX_H3_LOT")
+LotLayoutSpec = io.Custom("MINIMAX_H3_LOT_LAYOUT")
+
+
+class _LayoutBuilder:
+    """A content-aware layout rule: builds the LoT layout for whatever latent shape the sampler uses."""
+
+    def __init__(self, name: str, build):
+        self.name = name
+        self._build = build
+        self._cache: dict[tuple, object] = {}
+
+    def __call__(self, latent_t: int, token_h: int, token_w: int):
+        key = (latent_t, token_h, token_w)
+        if key not in self._cache:
+            self._cache[key] = self._build(latent_t, token_h, token_w)
+        return self._cache[key]
 
 
 class _Lot:
     """The adapter plus the layout rule; builds one splice per latent shape."""
 
-    def __init__(self, adapter, layout_name: str):
+    def __init__(self, adapter, layout_name: str, builder: _LayoutBuilder | None = None):
         self.adapter = adapter
-        self.layout_name = layout_name
+        self.layout_name = builder.name if builder is not None else layout_name
+        self.builder = builder
         self._splices: dict[tuple, LotSplice] = {}
 
     def splice(self, latent_t: int, lat_h: int, lat_w: int, device) -> LotSplice:
         key = (latent_t, lat_h, lat_w)
         if key not in self._splices:
-            layout = grid_layout(self.layout_name, latent_t, lat_h // 2, lat_w // 2)
+            if self.builder is not None:
+                layout = self.builder(latent_t, lat_h // 2, lat_w // 2)
+            else:
+                layout = grid_layout(self.layout_name, latent_t, lat_h // 2, lat_w // 2)
             self._splices[key] = LotSplice(self.adapter, layout, y_space=True)
+            log.info("MiniMax H3 LoT: layout %s, %d of %d tokens (%.2fx)", self.layout_name, layout.count,
+                     layout.dense_count, layout.dense_count / max(layout.count, 1))
         if next(self.adapter.parameters()).device != torch.device(device):
             self.adapter.to(device)
         return self._splices[key]
@@ -251,14 +275,17 @@ class MiniMaxH3LoTApply(io.ComfyNode):
                 io.Combo.Input("layout", options=list(GRID_LAYOUTS), default="center",
                                tooltip="center: fine in the middle, coarse at the edges (portraits). bands: fine "
                                        "top third, 2×2 middle, 4×2 bottom. uniform2/4: every token 2×2 / 4×4. "
-                                       "dense: no shortening (A/B check)."),
+                                       "dense: no shortening (A/B check). Ignored when layout_override is set."),
+                LotLayoutSpec.Input("layout_override", optional=True,
+                                    tooltip="Content-aware layout from a LoT Layout from Mask / Boxes / Depth / "
+                                            "Texture node: fine tokens where the content needs them."),
             ],
             outputs=[io.Model.Output(), LotSpec.Output(display_name="lot")],
         )
 
     @classmethod
-    def execute(cls, model, adapter, layout) -> io.NodeOutput:
-        lot = _Lot(_load_adapter(adapter), layout)
+    def execute(cls, model, adapter, layout, layout_override=None) -> io.NodeOutput:
+        lot = _Lot(_load_adapter(adapter), layout, layout_override)
         patched = model.clone()
         patched.remove_wrappers_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, WRAPPER_KEY)
         patched.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, WRAPPER_KEY,
@@ -297,4 +324,178 @@ class MiniMaxH3LoTUnscaleLatent(io.ComfyNode):
         return io.NodeOutput(out)
 
 
-LOT_NODES = [MiniMaxH3LoTApply, MiniMaxH3LoTUnscaleLatent]
+_BG_TIP = "Extent for tokens outside the region: 4 (4×4, faster) or 2 (2×2, safer quality)."
+
+
+def _bg(value: str) -> int:
+    return int(value[0])
+
+
+class MiniMaxH3LoTLayoutFromMask(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3LoTLayoutFromMask",
+            display_name="MiniMax H3 LoT Layout from Mask",
+            category="model/minimax/lot-layout",
+            description=("Semantic-mask layout (LoT paper supplementary): 1×1 tokens on the mask, 2×2 on the "
+                         "optional secondary mask, coarse elsewhere. A batch of masks is per frame (a tracked "
+                         "object); a single mask applies to every frame. Any resolution; it is pooled to tokens."),
+            inputs=[
+                io.Mask.Input("mask", tooltip="primary action region"),
+                io.Combo.Input("background", options=["4x4", "2x2"], default="4x4", tooltip=_BG_TIP),
+                io.Int.Input("dilate", default=1, min=0, max=8, tooltip="grow the fine region by N tokens (32 px each)"),
+                io.Float.Input("coverage", default=0.05, min=0.0, max=1.0, step=0.01,
+                               tooltip="share of a token's pixels that must be inside the mask"),
+                io.Mask.Input("secondary_mask", optional=True, tooltip="secondary objects -> 2×2"),
+            ],
+            outputs=[LotLayoutSpec.Output(display_name="layout")],
+        )
+
+    @classmethod
+    def execute(cls, mask, background, dilate, coverage, secondary_mask=None) -> io.NodeOutput:
+        m = mask.detach().float().cpu()
+        sm = None if secondary_mask is None else secondary_mask.detach().float().cpu()
+        return io.NodeOutput(_LayoutBuilder("mask", lambda t, h, w: sources.mask_layout(
+            m, t, h, w, secondary=sm, background=_bg(background), coverage=coverage, dilate=dilate)))
+
+
+class MiniMaxH3LoTLayoutFromBoxes(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3LoTLayoutFromBoxes",
+            display_name="MiniMax H3 LoT Layout from Boxes",
+            category="model/minimax/lot-layout",
+            description=("Bounding-box layout: 1×1 tokens inside the boxes, coarse elsewhere. Boxes are "
+                         "normalised x0,y0,x1,y1 in [0, 1], separated by ';' (e.g. a face: 0.3,0.1,0.7,0.5)."),
+            inputs=[
+                io.String.Input("boxes", default="0.3,0.1,0.7,0.5"),
+                io.String.Input("secondary_boxes", default="", tooltip="optional boxes -> 2×2"),
+                io.Combo.Input("background", options=["4x4", "2x2"], default="4x4", tooltip=_BG_TIP),
+                io.Int.Input("dilate", default=0, min=0, max=8),
+            ],
+            outputs=[LotLayoutSpec.Output(display_name="layout")],
+        )
+
+    @staticmethod
+    def parse(text: str) -> list[tuple[float, float, float, float]]:
+        boxes = []
+        for chunk in text.replace("\n", ";").split(";"):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            values = [float(v) for v in chunk.replace(" ", "").split(",")]
+            if len(values) != 4:
+                raise ValueError(f"box {chunk!r}: need x0,y0,x1,y1")
+            boxes.append(tuple(min(max(v, 0.0), 1.0) for v in values))
+        return boxes
+
+    @classmethod
+    def execute(cls, boxes, secondary_boxes, background, dilate) -> io.NodeOutput:
+        primary = cls.parse(boxes)
+        secondary = cls.parse(secondary_boxes)
+        if not primary:
+            raise ValueError("give at least one box")
+
+        def build(t, h, w):
+            mask = sources.boxes_to_mask(primary, h * 32, w * 32)
+            sec = sources.boxes_to_mask(secondary, h * 32, w * 32) if secondary else None
+            return sources.mask_layout(mask, t, h, w, secondary=sec, background=_bg(background), dilate=dilate)
+
+        return io.NodeOutput(_LayoutBuilder("boxes", build))
+
+
+class MiniMaxH3LoTLayoutFromDepth(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3LoTLayoutFromDepth",
+            display_name="MiniMax H3 LoT Layout from Depth",
+            category="model/minimax/lot-layout",
+            description=("Depth-of-field layout: 1×1 tokens near the focus depth, 2×2 one band away, coarse "
+                         "beyond. Feed a depth map (e.g. Depth Anything; brighter = nearer) of the first frame or "
+                         "of every frame."),
+            inputs=[
+                io.Image.Input("depth"),
+                io.Float.Input("focus", default=0.8, min=0.0, max=1.0, step=0.01,
+                               tooltip="depth value in focus (Depth Anything: 1 = nearest)"),
+                io.Float.Input("band", default=0.15, min=0.01, max=1.0, step=0.01),
+                io.Combo.Input("background", options=["4x4", "2x2"], default="4x4", tooltip=_BG_TIP),
+            ],
+            outputs=[LotLayoutSpec.Output(display_name="layout")],
+        )
+
+    @classmethod
+    def execute(cls, depth, focus, band, background) -> io.NodeOutput:
+        d = depth.detach().float().cpu()[..., :3].mean(-1)
+        return io.NodeOutput(_LayoutBuilder("depth", lambda t, h, w: sources.depth_layout(
+            d, t, h, w, focus=focus, band=band, background=_bg(background))))
+
+
+class MiniMaxH3LoTLayoutFromTexture(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3LoTLayoutFromTexture",
+            display_name="MiniMax H3 LoT Layout from Texture",
+            category="model/minimax/lot-layout",
+            description=("Texture-variance layout (the paper's VRS source): 1×1 tokens where the image is busy, "
+                         "coarse where it is flat. Use the i2v first frame, a reference, or a quick low-res dense "
+                         "preview (two-pass) as the image."),
+            inputs=[
+                io.Image.Input("image"),
+                io.Float.Input("fine_share", default=0.3, min=0.0, max=1.0, step=0.05,
+                               tooltip="share of tokens kept 1×1 (busiest first)"),
+                io.Float.Input("mid_share", default=0.3, min=0.0, max=1.0, step=0.05,
+                               tooltip="next share kept 2×2"),
+                io.Combo.Input("background", options=["4x4", "2x2"], default="4x4", tooltip=_BG_TIP),
+            ],
+            outputs=[LotLayoutSpec.Output(display_name="layout")],
+        )
+
+    @classmethod
+    def execute(cls, image, fine_share, mid_share, background) -> io.NodeOutput:
+        img = image.detach().float().cpu()
+        fine_q = 1.0 - fine_share
+        mid_q = max(0.0, fine_q - mid_share)
+        return io.NodeOutput(_LayoutBuilder("texture", lambda t, h, w: sources.texture_layout(
+            img, t, h, w, fine_q=fine_q, mid_q=mid_q, background=_bg(background))))
+
+
+class MiniMaxH3LoTLayoutPreview(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3LoTLayoutPreview",
+            display_name="MiniMax H3 LoT Layout Preview",
+            category="model/minimax/lot-layout",
+            description=("Draw the token layout a LoT layout makes for this canvas: red 1×1, orange 2×2, "
+                         "grey 4×4 (outlined), one image per latent frame, with the compression in the log."),
+            inputs=[
+                LotLayoutSpec.Input("layout"),
+                io.Int.Input("width", default=512, min=32, max=nodes.MAX_RESOLUTION, step=32),
+                io.Int.Input("height", default=768, min=32, max=nodes.MAX_RESOLUTION, step=32),
+                io.Int.Input("latent_frames", default=1, min=1, max=64,
+                             tooltip="1 for a still; 7 for a 22-frame clip"),
+            ],
+            outputs=[io.Image.Output()],
+        )
+
+    @classmethod
+    def execute(cls, layout, width, height, latent_frames) -> io.NodeOutput:
+        lay = layout(latent_frames, height // 32, width // 32)
+        colours = {1: (0.93, 0.31, 0.43), 2: (0.98, 0.65, 0.25), 4: (0.85, 0.85, 0.85)}
+        out = torch.ones(latent_frames, height, width, 3)
+        for r in lay.rects:
+            y0, x0, y1, x1 = r.u * 32, r.v * 32, (r.u + r.eh) * 32, (r.v + r.ew) * 32
+            out[r.t, y0:y1, x0:x1] = torch.tensor(colours.get(max(r.eh, r.ew), (0.6, 0.6, 0.6)))
+            out[r.t, y0:y1, x0] = out[r.t, y0, x0:x1] = 0.2
+        log.info("MiniMax H3 LoT layout preview: %d of %d tokens (%.2fx)", lay.count, lay.dense_count,
+                 lay.dense_count / max(lay.count, 1))
+        return io.NodeOutput(out)
+
+
+LOT_NODES = [MiniMaxH3LoTApply, MiniMaxH3LoTUnscaleLatent, MiniMaxH3LoTLayoutFromMask,
+             MiniMaxH3LoTLayoutFromBoxes, MiniMaxH3LoTLayoutFromDepth, MiniMaxH3LoTLayoutFromTexture,
+             MiniMaxH3LoTLayoutPreview]

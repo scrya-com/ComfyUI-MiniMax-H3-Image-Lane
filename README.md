@@ -79,6 +79,8 @@ Synthetic 8×8 contract check (checkpoint 14000, one noise seed). This is the mi
 |---|---|
 | **MiniMax H3 LoT Apply (research)** | MODEL → MODEL + `lot`. Adds a diffusion-model wrapper that runs Comfy's own H3 forward with the *target* rows as a LoT layout. Text, keyframe/reference rows, audio and blocks are stock. Layouts: `center` (fine in the middle, coarse at the edges: portraits), `bands`, `uniform2`, `uniform4`, `dense` (A/B; reproduces the stock forward exactly). |
 | **MiniMax H3 LoT Unscale Latent** | **Required before VAE Decode.** The adapter samples in LoT's scaled latent space; this maps the result back. |
+| **LoT Layout from Boxes / Mask / Depth / Texture** | Content-aware layouts (the LoT paper's layout sources) for LoT Apply's `layout_override`: 1×1 tokens inside boxes, on a (per-frame) mask, near a focus depth, or where an image is busy; 2×2 for secondary regions; 2×2 or 4×4 background. |
+| **LoT Layout Preview** | Draws a layout for a canvas (red 1×1, orange 2×2, grey 4×4) and logs the compression. |
 
 ### Quick start: download → test → validate timing → train
 
@@ -109,6 +111,7 @@ Workflows (API format), each sampling the same seed twice, LoT `center` and dens
 | Workflow | Target | Nodes |
 |---|---|---|
 | `workflows/t1_lot_image_api.json` | 768×1152 still (T=1) | this pack's Image to Image + Image VAE |
+| `workflows/t1_lot_boxes_api.json` | 768×1152 still, **face box layout** | Boxes → LoT Apply `layout_override` + Layout Preview |
 | `workflows/lot_video_api.json` | 512×768, 22-frame clip | stock **MiniMax H3 Image to Video** (t2va; add `first_frame` for i2va) + video VAE |
 
 LoT Apply works with any H3 target length: the layout repeats on every latent frame and the time positions follow H3's own clock. Keyframe and reference rows stay dense.
@@ -119,6 +122,8 @@ Measured in Comfy on one RTX PRO 4000 Blackwell (24 GB), 20 steps:
 |---|---|---|---|
 | 768×1152 still (300 of 864 tokens) | 4.1 it/s | 5.6 it/s | 1.35× |
 | 512×768, 22 frames (7 latent frames) | 1.33 it/s | 3.45 it/s | **2.6×** |
+
+**Pick the layout for the content.** On the held-out talking-head prompt, a face box (1×1 face, 2×2 shoulders) came out nearly identical to dense with 576 of 864 tokens, while the fixed `center` layout blurred and blocked the face. Content-aware layouts trade less speed for much better quality; tighten the boxes for more speed.
 
 The gain grows with sequence length: Comfy's fused kernels make short dense steps cheap. Quality is below dense, with soft or blocky edges where tokens are coarse; on the clip the face (fine tokens) stays readable and moves with the line.
 

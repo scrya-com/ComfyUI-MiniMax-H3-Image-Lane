@@ -1,4 +1,4 @@
-# Vendored from johndpope/MiniMax-H3 scripts/lot/layout.py at 432f6d4.
+# Vendored from johndpope/MiniMax-H3 scripts/lot/layout.py at 2cdf747.
 # Do not edit here: change scripts/lot and re-run scripts/lot/vendor_comfy.py.
 """Level-of-Token layouts.
 

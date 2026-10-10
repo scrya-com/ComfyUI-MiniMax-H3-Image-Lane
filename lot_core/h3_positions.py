@@ -1,4 +1,4 @@
-# Vendored from johndpope/MiniMax-H3 scripts/lot/h3_positions.py at 432f6d4.
+# Vendored from johndpope/MiniMax-H3 scripts/lot/h3_positions.py at 2cdf747.
 # Do not edit here: change scripts/lot and re-run scripts/lot/vendor_comfy.py.
 """Rotary positions for an H3 target-video tail.
 

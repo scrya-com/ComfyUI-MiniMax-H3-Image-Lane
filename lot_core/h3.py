@@ -1,4 +1,4 @@
-# Vendored from johndpope/MiniMax-H3 scripts/lot/h3.py at 432f6d4.
+# Vendored from johndpope/MiniMax-H3 scripts/lot/h3.py at 2cdf747.
 # Do not edit here: change scripts/lot and re-run scripts/lot/vendor_comfy.py.
 """MiniMax-H3 geometry for a Level-of-Token visual stream.
 
