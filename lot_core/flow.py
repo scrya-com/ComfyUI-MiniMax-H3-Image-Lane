@@ -1,5 +1,5 @@
-# Vendored from johndpope/MiniMax-H3 scripts/lot/flow.py at 2cdf747.
-# Do not edit here: change scripts/lot and re-run scripts/lot/vendor_comfy.py.
+# Vendored from scrya-com/lot-diffusion lot/flow.py at 0f43b7b.
+# Do not edit here: change lot and re-run lot/vendor_comfy.py.
 """Patch-wise asymmetric flow for Level-of-Token Diffusion.
 
 The velocity algebra is LakonLab's ``AsymFlowMixin.asymflow_velocity`` with
@@ -230,11 +230,11 @@ def lot_h3_clean_loss(
     sigma: torch.Tensor | float,
     sigma_floor: float = 0.05,
 ) -> torch.Tensor:
-    """Eq. 17 for H3's head, which predicts ``x0 - eps`` (Fizgig ``sampling.py``).
+    """Eq. 17 for H3's head, which predicts ``x0 - eps`` (H3's scheduler: ``x0 = x_t + sigma * v``).
 
     The clean estimate is ``y_t + sigma * out``, not ``clean_from_velocity`` (that
     is the ``eps - x0`` convention). For ``sigma >= sigma_floor`` this equals
-    ``mean((out - (y0 - eps))^2)``: Fizgig's own velocity MSE, taken in y-space.
+    ``mean((out - (y0 - eps))^2)``: the ordinary H3 velocity MSE, taken in y-space.
     """
     sig = _broadcast_sigma(sigma, y0).to(dtype=torch.float32)
     y0_hat = y_t.float() + sig * out.float()

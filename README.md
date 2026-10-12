@@ -52,10 +52,10 @@ restores it. Video graphs keep snapping `length=1` → 5 frames / T′=2.
 
 ## Level-of-Token (LoT) for stills and video — research
 
-Gallery, weight links, and the training call: **[scrya.com/lot](https://scrya.com/lot)**.
+Code, training and timing: **[scrya-com/lot-diffusion](https://github.com/scrya-com/lot-diffusion)**.
 
 > [!WARNING]
-> **⚠️ THIS MODEL NEEDS MORE TRAINING — HELP WANTED.** LoT output is still visibly softer than dense H3 (blocking at the edges, smeared hair). The pipeline works; the weights need more training. Join in: **[shootthesound/Fizgig discussions #183](https://github.com/shootthesound/Fizgig/discussions/183)**.
+> **⚠️ THIS MODEL NEEDS MORE TRAINING — HELP WANTED.** LoT output is still visibly softer than dense H3 (blocking at the edges, smeared hair). The pipeline works; the weights need more training. Join in: **[the help-wanted thread](https://github.com/johndpope/MiniMax-H3/issues/1)**.
 
 ![ComfyUI still, dense versus LoT center](assets/lot-h3-comfyui-center-vs-dense.png)
 
@@ -95,8 +95,8 @@ cp /tmp/lot/run4_nikki_distill/lora.safetensors    ComfyUI/models/loras/minimax_
 ```
 
 3. **Test:** restart ComfyUI and load `workflows/lot_video_api.json` (22-frame clip) or `workflows/t1_lot_image_api.json` (still). They are API-format JSON: drop them on the canvas, or POST them to `/prompt`. Each one samples the same seed twice: **Sample (LoT)** and **Sample (dense)**.
-4. **Validate the timing:** compare the it/s the console prints for the two sampler runs (LoT runs first). On a 24 GB RTX PRO 4000 Blackwell: clip 3.45 vs 1.33 it/s (**2.6×**), still 5.6 vs 4.1 it/s (1.35×). Set the layout to `dense` for an exact stock A/B. For a per-forward benchmark outside Comfy, use [`time_lot_h3.py`](https://github.com/johndpope/MiniMax-H3/blob/main/scripts/lot/time_lot_h3.py).
-5. **Train your own adapter:** [MiniMax-H3 cheatsheet](https://github.com/johndpope/MiniMax-H3/blob/main/scripts/lot/CHEATSHEET.md) (from your own mp4s: cut, cache, fit, `train_h3.py`, publish). Put the result's `adapter.safetensors` in `models/lot/` and its `lora.safetensors` in `models/loras/`.
+4. **Validate the timing:** compare the it/s the console prints for the two sampler runs (LoT runs first). On a 24 GB RTX PRO 4000 Blackwell: clip 3.45 vs 1.33 it/s (**2.6×**), still 5.6 vs 4.1 it/s (1.35×). Set the layout to `dense` for an exact stock A/B. For a per-forward benchmark outside Comfy, use [`lot/time_lot_h3.py`](https://github.com/scrya-com/lot-diffusion/blob/main/lot/time_lot_h3.py).
+5. **Train your own adapter:** [lot-diffusion cheatsheet](https://github.com/scrya-com/lot-diffusion/blob/main/lot/CHEATSHEET.md) (from your own mp4s: cut, cache, fit, `train_h3.py`, publish). Put the result's `adapter.safetensors` in `models/lot/` and its `lora.safetensors` in `models/loras/`.
 
 **Weights** ([HF johndpope/MiniMax-H3-LoT](https://huggingface.co/johndpope/MiniMax-H3-LoT), MiniMax H3 Community License, **not for use in the EU, UK, South Korea or USA**):
 
@@ -129,7 +129,7 @@ The gain grows with sequence length: Comfy's fused kernels make short dense step
 
 Limits: no partial denoise (start from empty noise), no denoise masks (those steps fall back to dense), no PDD multi-head checkpoints. Attention patches that read the packed layout see the dense spans.
 
-`lot_core/` is vendored from [johndpope/MiniMax-H3 `scripts/lot`](https://github.com/johndpope/MiniMax-H3/tree/main/scripts/lot) (see the header of each file for the commit). Training your own adapter: [cheatsheet](https://github.com/johndpope/MiniMax-H3/blob/main/scripts/lot/CHEATSHEET.md).
+`lot_core/` is vendored from [scrya-com/lot-diffusion `lot/`](https://github.com/scrya-com/lot-diffusion/tree/main/lot) (see the header of each file for the commit). Training your own adapter: [cheatsheet](https://github.com/scrya-com/lot-diffusion/blob/main/lot/CHEATSHEET.md).
 
 ## License
 

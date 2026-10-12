@@ -1,5 +1,5 @@
-# Vendored from johndpope/MiniMax-H3 scripts/lot/h3_positions.py at 2cdf747.
-# Do not edit here: change scripts/lot and re-run scripts/lot/vendor_comfy.py.
+# Vendored from scrya-com/lot-diffusion lot/h3_positions.py at 0f43b7b.
+# Do not edit here: change lot and re-run lot/vendor_comfy.py.
 """Rotary positions for an H3 target-video tail.
 
 H3 does not feed integer token indices to RoPE. Each uniform token sits on a
@@ -116,7 +116,7 @@ def packed_positions(
 ) -> tuple[torch.Tensor, int]:
     """``(S, 3)`` positions and the index where target video begins.
 
-    Order matches Fizgig: text, keyframes, refs, audio, target video. Audio
+    Order matches H3's packing (and musubi-tuner's ``build_position_grid``): text, keyframes, refs, audio, target video. Audio
     does not advance the video clock. With no keyframes and no refs both start
     at ``text_len``. A reference image advances the cursor by 1. A video-kind
     reference ``(h, w, t)`` with ``t > 1`` advances it by the video span sum.

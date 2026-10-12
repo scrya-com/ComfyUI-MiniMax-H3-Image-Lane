@@ -1,5 +1,5 @@
-# Vendored from johndpope/MiniMax-H3 scripts/lot/adapter.py at 2cdf747.
-# Do not edit here: change scripts/lot and re-run scripts/lot/vendor_comfy.py.
+# Vendored from scrya-com/lot-diffusion lot/adapter.py at 0f43b7b.
+# Do not edit here: change lot and re-run lot/vendor_comfy.py.
 """Level-of-Token DiT adapter.
 
 The backbone still runs attention. This module replaces only the visual
@@ -237,7 +237,7 @@ class LotVisualAdapter(nn.Module):
         """Extent heads plus eq. 9, scattered onto the uniform lattice.
 
         Eq. 9 assumes the head predicts ``P eps - x0`` and returns ``eps - x0``.
-        H3's head predicts the negation (``x0 - eps``, Fizgig ``sampling.py``).
+        H3's head predicts the negation (``x0 - eps``; H3's scheduler steps ``x0 = x_t + sigma * v``).
         ``x0_minus_eps=True`` flips the head before recovery and the velocity
         after, so the result stays in the caller's convention. A unit extent has
         no complement, so 1x1 parity cannot see a wrong sign here.

@@ -1,5 +1,5 @@
-# Vendored from johndpope/MiniMax-H3 scripts/lot/h3.py at 2cdf747.
-# Do not edit here: change scripts/lot and re-run scripts/lot/vendor_comfy.py.
+# Vendored from scrya-com/lot-diffusion lot/h3.py at 0f43b7b.
+# Do not edit here: change lot and re-run lot/vendor_comfy.py.
 """MiniMax-H3 geometry for a Level-of-Token visual stream.
 
 H3's native patch is ``(t, h, w) = (1, 2, 2)`` on 24-channel video latents,

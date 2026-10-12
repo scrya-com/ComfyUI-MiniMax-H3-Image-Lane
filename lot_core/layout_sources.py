@@ -1,5 +1,5 @@
-# Vendored from johndpope/MiniMax-H3 scripts/lot/layout_sources.py at 2cdf747.
-# Do not edit here: change scripts/lot and re-run scripts/lot/vendor_comfy.py.
+# Vendored from scrya-com/lot-diffusion lot/layout_sources.py at 0f43b7b.
+# Do not edit here: change lot and re-run lot/vendor_comfy.py.
 """Content-aware LoT layouts: semantic mask, bounding boxes, depth of field, texture.
 
 The LoT paper's supplementary (layout-adaptive generation) derives per-frame

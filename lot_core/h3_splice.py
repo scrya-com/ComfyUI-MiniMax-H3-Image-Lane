@@ -1,8 +1,9 @@
-# Vendored from johndpope/MiniMax-H3 scripts/lot/h3_splice.py at 2cdf747.
-# Do not edit here: change scripts/lot and re-run scripts/lot/vendor_comfy.py.
-"""Target-video tail for a Fizgig ``MiniMaxH3DiT``.
+# Vendored from scrya-com/lot-diffusion lot/h3_splice.py at 0f43b7b.
+# Do not edit here: change lot and re-run lot/vendor_comfy.py.
+"""Target-video tail for an H3 DiT: embed, position and project the LoT tokens.
 
-This module does not import Fizgig. The DiT loads it only when ``_lot`` is set.
+This module imports no model code. ``h3_musubi.predict(..., lot=splice)`` calls
+it at three points of the forward (embedding, rotary positions, output head).
 
 Latent space. The adapter works in y-space: each extent's clean patch is the
 pretrained latent divided by that extent's scale ``s`` (eq. 16). Until a
@@ -96,7 +97,7 @@ class LotSplice:
     def project_rows(self, modulated: torch.Tensor, tokens: torch.Tensor, sigma: torch.Tensor | float) -> torch.Tensor:
         """Extent linears plus the dense velocity, flattened in patchify order.
 
-        The result is H3's head convention, ``x0 - eps``, so the Fizgig sampler
+        The result is H3's head convention, ``x0 - eps``, so H3's samplers
         steps it unchanged. It is in the same space as ``tokens``: y-space once
         scales are fitted.
         """
