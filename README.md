@@ -55,7 +55,7 @@ restores it. Video graphs keep snapping `length=1` → 5 frames / T′=2.
 Code, training and timing: **[scrya-com/lot-diffusion](https://github.com/scrya-com/lot-diffusion)**.
 
 > [!WARNING]
-> **⚠️ THIS MODEL NEEDS MORE TRAINING — HELP WANTED.** LoT output is still visibly softer than dense H3 (blocking at the edges, smeared hair). The pipeline works; the weights need more training. Join in: **[the help-wanted thread](https://github.com/johndpope/MiniMax-H3/issues/1)**.
+> **⚠️ THIS MODEL NEEDS MORE TRAINING — HELP WANTED.** LoT output is still visibly softer than dense H3 (blocking at the edges, smeared hair). The pipeline works; the weights need more training. Join in: **[the help-wanted discussion](https://github.com/scrya-com/lot-diffusion/discussions/1)**.
 
 ![ComfyUI still, dense versus LoT center](assets/lot-h3-comfyui-center-vs-dense.png)
 
