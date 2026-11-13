@@ -12,8 +12,8 @@ Does not patch stock Comfy. One node runs the paper's sampler on the loaded DiT:
 
 The two-track LoRA is not trained yet, so this tests the pass and the region.
 It does not sharpen a face beyond what the half-resolution track already drew.
-Default switch is 16 of 20: on H3's shift 12 that is noise 0.80, the earliest
-step where the v3 head finds an off-centre subject and still leaves HR steps.
+Default switch is 16 of 20: on H3's shift 12 the head reads step 15 (noise 0.80), the
+earliest step where the v3 head finds an off-centre subject, and the HR track re-noises at 0.75.
 """
 from __future__ import annotations
 
@@ -123,6 +123,9 @@ def _smooth(field: torch.Tensor, sigma: float) -> torch.Tensor:
 def _region_mask(field: torch.Tensor, alpha: float) -> torch.Tensor:
     """``field`` ``(T, H, W)`` logits -> bool mask, ``m + alpha (p - m)``."""
     smoothed = _smooth(field.float(), 1.0)
+    if smoothed.shape[0] > 1:                       # [1, 2, 1] / 4 across latent frames, as lot/mixed_res.region_mask
+        padded = torch.cat([smoothed[:1], smoothed, smoothed[-1:]])
+        smoothed = 0.25 * padded[:-2] + 0.5 * padded[1:-1] + 0.25 * padded[2:]
     flat = smoothed.flatten()
     median, top = float(flat.median()), float(torch.quantile(flat, 0.99))
     return smoothed > median + alpha * (top - median)
@@ -348,11 +351,15 @@ def _paste(mask: torch.Tensor, hr: torch.Tensor, lr_up: torch.Tensor, feather: f
     # Token mask (T, h, w) -> full-resolution latent grid, one single-channel map per frame ``(T, 1, H, W)``.
     weight = mask.detach().float().reshape(-1, *mask.shape[-2:])
     weight = weight.repeat_interleave(4, -2).repeat_interleave(4, -1)[:, None]
-    if feather > 0:
-        radius = int(round(feather))
-        eroded = -F.max_pool2d(-weight, 2 * radius + 1, stride=1, padding=radius)
-        kernel = torch.ones(1, 1, 2 * radius + 1, 2 * radius + 1, device=weight.device) / (2 * radius + 1) ** 2
-        weight = F.conv2d(F.pad(eroded, (radius,) * 4, mode="replicate"), kernel)
+    # Ramp inside the region only (outside it the HR track was never denoised): 1/R on the edge cell,
+    # +1/R per cell of depth. Every region cell keeps weight > 0 (the old erode-then-blur zeroed small regions).
+    radius = int(round(feather))
+    if radius > 1:
+        level, total = weight, weight.clone()
+        for _ in range(radius - 1):
+            level = -F.max_pool2d(-level, 3, stride=1, padding=1)
+            total = total + level
+        weight = total / radius
     weight = weight.permute(1, 0, 2, 3)[None].to(hr.device, hr.dtype)          # (1, 1, T, H, W)
     return weight * hr + (1.0 - weight) * lr_up
 
@@ -425,6 +432,12 @@ def sample_mpeg(model_patcher, positive, vae, *, width, height, steps, switch, h
              mask.numel(), switch, latent_t)
 
     if not mask.any() or switch >= steps:
+        # No region: finish the LR schedule with the base model, so the upscaled latent is clean.
+        for index in range(switch, steps):
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            sigma, sigma_next = float(sigmas[index]), float(sigmas[index + 1])
+            velocity, _ = _predict_lr(dm, lr, sigma, context, payload, audio_gen)
+            lr, _x0 = _euler(lr, velocity, sigma, sigma_next)
         comfy.model_management.unload_all_models()
         full = _vae_upscale(vae, lr)
         return full, mask, share
@@ -480,7 +493,7 @@ class MiniMaxH3MpegDiffusion(io.ComfyNode):
                              tooltip="Pixel frames. 1 is a still; 22 is a 7-latent-frame clip (snapped to 17n+5)."),
                 io.Int.Input("steps", default=20, min=2, max=50),
                 io.Int.Input("switch", default=16, min=1, max=49,
-                             tooltip="LR steps before the region goes full resolution. 16 of 20 is noise 0.80 on shift 12."),
+                             tooltip="LR steps before the region goes full resolution. 16 of 20 re-noises at 0.75 on shift 12."),
                 io.Int.Input("hr_steps", default=6, min=0, max=20,
                              tooltip="Steps after the switch, linear in sigma. 0 keeps the leftover schedule steps."),
                 io.Int.Input("seed", default=0, min=0, max=2**31 - 1),
