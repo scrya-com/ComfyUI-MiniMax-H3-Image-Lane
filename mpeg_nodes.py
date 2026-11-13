@@ -42,6 +42,22 @@ VIDEO_SHIFT = 12.0
 AUDIO_SHIFT = 3.0
 AUDIO_CHANNELS = 32
 AUDIO_FRAMES = 2          # one still: (10 * 1 + 3) // 6
+FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
+
+
+def _latent_frames(num_frames: int) -> int:
+    """Pixel frames (snapped down onto 17n+5) -> H3 latent frames; 1 is a still. 22 -> 7."""
+    if num_frames <= 1:
+        return 1
+    n = max(5, int(num_frames))
+    n -= (n - 5) % 17
+    return 5 * (n - 5) // 17 + 2
+
+
+def _audio_frames(latent_t: int) -> int:
+    """40 Hz audio latents covering the clip: H3's (10 f + 3) // 6 for f pixel frames."""
+    pixel = sum(FRAME_PER_TOKEN[k % 5] for k in range(int(latent_t)))
+    return (10 * pixel + 3) // 6
 MID_BLOCK = 25
 
 
@@ -169,15 +185,16 @@ def _time_embed(model, values, device, dtype):
     return model.time_embedder(t_vals).to(dtype)
 
 
-def _silence(sigma_a: float, device, generator) -> torch.Tensor:
-    eps = torch.randn(1, AUDIO_CHANNELS, 2, AUDIO_FRAMES, device=device, generator=generator)
+def _silence(sigma_a: float, device, generator, audio_t: int = AUDIO_FRAMES) -> torch.Tensor:
+    eps = torch.randn(1, AUDIO_CHANNELS, 2, audio_t, device=device, generator=generator)
     return sigma_a * eps
 
 
 def _predict_lr(model, video, sigma: float, context, payload, generator, capture_block=None):
     """One base-model step. Returns the velocity in the musubi sign (Comfy's forward is negated)."""
     device = video.device
-    audio = _silence(_audio_sigma(sigma), device, generator)
+    audio_t = _audio_frames(video.shape[2])
+    audio = _silence(_audio_sigma(sigma), device, generator, audio_t)
     timestep = torch.tensor([sigma * 1000.0], device=device, dtype=torch.float32)
     captured = {}
     handle = None
@@ -194,7 +211,7 @@ def _predict_lr(model, video, sigma: float, context, payload, generator, capture
     if capture_block is not None:
         text_len = context.shape[1]
         _b, _c, frames, lat_h, lat_w = video.shape
-        layout = PackedLayout(text_len, frames, lat_h, lat_w, AUDIO_FRAMES)
+        layout = PackedLayout(text_len, frames, lat_h, lat_w, audio_t)
         start, stop, _kind = _video_span(layout)
         states = captured["h"][start:stop].detach().float()
     return -pred, states
@@ -235,16 +252,17 @@ def _predict_pair(model, lr, hr, plan, sigma: float, context, payload, generator
     dtype = context.dtype
     text_len = context.shape[1]
     _b, _c, frames, lat_h, lat_w = lr.shape
-    layout = PackedLayout(text_len, frames, lat_h, lat_w, AUDIO_FRAMES)
+    audio_t = _audio_frames(frames)
+    layout = PackedLayout(text_len, frames, lat_h, lat_w, audio_t)
     video_start, _video_stop, _kind = _video_span(layout)
     if plan.lr_count != _video_stop - video_start:
         raise ValueError(f"plan has {plan.lr_count} LR tokens, the latent has {_video_stop - video_start}")
-    hr_layout = PackedLayout(text_len, frames, lat_h * 2, lat_w * 2, AUDIO_FRAMES)
+    hr_layout = PackedLayout(text_len, frames, lat_h * 2, lat_w * 2, audio_t)
     hr_start, hr_stop, _kind = _video_span(hr_layout)
     hr_positions = hr_layout.position_ids[hr_start:hr_stop]
     positions = torch.cat([layout.position_ids, hr_positions[plan.hr_index.cpu()]])
 
-    audio = _silence(_audio_sigma(sigma), device, generator)
+    audio = _silence(_audio_sigma(sigma), device, generator, audio_t)
     lr_rows = patchify_video(lr.to(torch.float32), model.patch_size)
     hr_rows = patchify_video(hr.to(torch.float32), model.patch_size)[plan.hr_index]
     video = model.video_patch_proj(torch.cat([lr_rows, hr_rows], dim=0)).to(dtype)
@@ -311,25 +329,31 @@ def _predict_pair(model, lr, hr, plan, sigma: float, context, payload, generator
 
 
 def _vae_upscale(vae, latent: torch.Tensor) -> torch.Tensor:
-    """Decode, bicubic ×2, encode. ``latent`` is ``(1, 24, 1, h, w)``."""
+    """Decode, bicubic ×2 per frame, encode. ``latent`` is ``(1, 24, T, h, w)``, a still (T = 1) or a clip."""
     pixels = vae.decode(latent)
     if pixels.ndim == 5:
-        pixels = pixels[:, 0]
+        pixels = pixels.reshape(-1, *pixels.shape[-3:])            # (frames, H, W, 3)
+    if latent.shape[2] == 1:
+        pixels = pixels[:1]
     scaled = F.interpolate(pixels.movedim(-1, 1), scale_factor=2, mode="bicubic", align_corners=False).clamp(0, 1)
     encoded = vae.encode(scaled.movedim(1, -1))
     if encoded.ndim == 4:
         encoded = encoded.unsqueeze(2)
+    if encoded.shape[2] != latent.shape[2]:
+        raise RuntimeError(f"VAE round trip changed latent frames {latent.shape[2]} -> {encoded.shape[2]}")
     return encoded
 
 
 def _paste(mask: torch.Tensor, hr: torch.Tensor, lr_up: torch.Tensor, feather: float) -> torch.Tensor:
-    weight = mask.float().repeat_interleave(4, -2).repeat_interleave(4, -1)
+    # Token mask (T, h, w) -> full-resolution latent grid, one single-channel map per frame ``(T, 1, H, W)``.
+    weight = mask.detach().float().reshape(-1, *mask.shape[-2:])
+    weight = weight.repeat_interleave(4, -2).repeat_interleave(4, -1)[:, None]
     if feather > 0:
         radius = int(round(feather))
-        eroded = -F.max_pool2d(-weight[:, None], 2 * radius + 1, stride=1, padding=radius)
-        kernel = torch.ones(1, 1, 2 * radius + 1, 2 * radius + 1) / (2 * radius + 1) ** 2
-        weight = F.conv2d(F.pad(eroded, (radius,) * 4, mode="replicate"), kernel)[:, 0]
-    weight = weight.view(1, 1, 1, *weight.shape).to(hr.device, hr.dtype)
+        eroded = -F.max_pool2d(-weight, 2 * radius + 1, stride=1, padding=radius)
+        kernel = torch.ones(1, 1, 2 * radius + 1, 2 * radius + 1, device=weight.device) / (2 * radius + 1) ** 2
+        weight = F.conv2d(F.pad(eroded, (radius,) * 4, mode="replicate"), kernel)
+    weight = weight.permute(1, 0, 2, 3)[None].to(hr.device, hr.dtype)          # (1, 1, T, H, W)
     return weight * hr + (1.0 - weight) * lr_up
 
 
@@ -344,7 +368,7 @@ def _context_and_payload(model, positive):
     if tags is not None:
         payload["text_token_tags"] = tags
     if extra.get("minimax_refs") or extra.get("minimax_keyframes"):
-        raise ValueError("MPEG-Diffusion node samples a text-only still. Reference and keyframe conds are not wired.")
+        raise ValueError("MPEG-Diffusion node samples from text only. Reference and keyframe conds are not wired.")
     return cond, payload
 
 
@@ -354,7 +378,7 @@ def _euler(x, velocity, sigma, sigma_next):
 
 
 def sample_mpeg(model_patcher, positive, vae, *, width, height, steps, switch, hr_steps, seed, alpha, feather,
-                region_name, box):
+                region_name, box, frames: int = 1):
     if width % 64 or height % 64:
         raise ValueError("width and height must be multiples of 64")
     if not 1 <= switch <= steps:
@@ -369,7 +393,8 @@ def sample_mpeg(model_patcher, positive, vae, *, width, height, steps, switch, h
     sigmas = _sigma_schedule(steps, float(getattr(dm, "sigma_shift_video", VIDEO_SHIFT)))
     generator = torch.Generator(device=device).manual_seed(seed)
     audio_gen = torch.Generator(device=device).manual_seed(seed + 1)
-    lr = torch.randn(1, 24, 1, lat_h, lat_w, device=device, generator=generator)
+    latent_t = _latent_frames(frames)
+    lr = torch.randn(1, 24, latent_t, lat_h, lat_w, device=device, generator=generator)
     head = None
     block = MID_BLOCK
     if region_name != "box":
@@ -391,25 +416,27 @@ def sample_mpeg(model_patcher, positive, vae, *, width, height, steps, switch, h
         bar.update(1)
 
     if head is not None:
-        logits = _score(states, *head).reshape(1, tok_h, tok_w)
-        mask = _region_mask(logits, alpha)[0]
+        logits = _score(states, *head).reshape(latent_t, tok_h, tok_w)
+        mask = _region_mask(logits, alpha)
     else:
-        mask = _box_mask(box, 1, tok_h, tok_w)[0]
+        mask = _box_mask(box, latent_t, tok_h, tok_w)
     share = float(mask.float().mean())
-    log.info("MPEG-Diffusion region share %.3f (%d of %d tokens) switch=%d", share, int(mask.sum()), tok_h * tok_w, switch)
+    log.info("MPEG-Diffusion region share %.3f (%d of %d tokens) switch=%d latent_t=%d", share, int(mask.sum()),
+             mask.numel(), switch, latent_t)
 
     if not mask.any() or switch >= steps:
         comfy.model_management.unload_all_models()
         full = _vae_upscale(vae, lr)
         return full, mask, share
 
-    plan = _Plan(mask[None])
+    plan = _Plan(mask)
     sigma = float(sigmas[switch])
     comfy.model_management.unload_all_models()
     up = _vae_upscale(vae, x0)
     comfy.model_management.load_models_gpu([model_patcher])
     hr_gen = torch.Generator(device=device).manual_seed(seed + 2)
-    hr = (1.0 - sigma) * up.to(device) + sigma * torch.randn(1, 24, 1, lat_h * 2, lat_w * 2, device=device, generator=hr_gen)
+    hr = (1.0 - sigma) * up.to(device) + sigma * torch.randn(1, 24, latent_t, lat_h * 2, lat_w * 2, device=device,
+                                                             generator=hr_gen)
     tail = sigmas[switch:] if not hr_steps else torch.linspace(sigma, 0.0, hr_steps + 1, dtype=torch.float64)
     for index in range(len(tail) - 1):
         comfy.model_management.throw_exception_if_processing_interrupted()
@@ -449,6 +476,8 @@ class MiniMaxH3MpegDiffusion(io.ComfyNode):
                 io.Vae.Input("vae", tooltip="Same VAE you will decode with. It upscales the LR latent at the switch."),
                 io.Int.Input("width", default=1344, min=64, max=4096, step=64),
                 io.Int.Input("height", default=768, min=64, max=4096, step=64),
+                io.Int.Input("frames", default=1, min=1, max=241,
+                             tooltip="Pixel frames. 1 is a still; 22 is a 7-latent-frame clip (snapped to 17n+5)."),
                 io.Int.Input("steps", default=20, min=2, max=50),
                 io.Int.Input("switch", default=16, min=1, max=49,
                              tooltip="LR steps before the region goes full resolution. 16 of 20 is noise 0.80 on shift 12."),
@@ -473,13 +502,14 @@ class MiniMaxH3MpegDiffusion(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model, positive, vae, width, height, steps, switch, hr_steps, seed, region,
+    def execute(cls, model, positive, vae, width, height, frames, steps, switch, hr_steps, seed, region,
                 box_x0, box_y0, box_x1, box_y1, alpha, feather) -> io.NodeOutput:
         latent, mask, share = sample_mpeg(
             model, positive, vae, width=width, height=height, steps=steps, switch=switch, hr_steps=hr_steps,
-            seed=seed, alpha=alpha, feather=feather, region_name=region, box=(box_x0, box_y0, box_x1, box_y1))
-        pixels = mask.float().repeat_interleave(64, -2).repeat_interleave(64, -1)
-        image = pixels[None, ..., None].expand(-1, -1, -1, 3).clamp(0, 1).cpu()
+            seed=seed, alpha=alpha, feather=feather, region_name=region, box=(box_x0, box_y0, box_x1, box_y1),
+            frames=frames)
+        pixels = mask.float().reshape(-1, *mask.shape[-2:]).repeat_interleave(64, -2).repeat_interleave(64, -1)
+        image = pixels[..., None].expand(-1, -1, -1, 3).clamp(0, 1).cpu()      # one region image per latent frame
         log.info("MPEG-Diffusion done region_share=%.3f latent=%s", share, tuple(latent.shape))
         return io.NodeOutput({"samples": latent.cpu()}, image)
 
