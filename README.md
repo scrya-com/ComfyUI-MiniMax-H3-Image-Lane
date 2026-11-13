@@ -131,6 +131,27 @@ Limits: no partial denoise (start from empty noise), no denoise masks (those ste
 
 `lot_core/` is vendored from [scrya-com/lot-diffusion `lot/`](https://github.com/scrya-com/lot-diffusion/tree/main/lot) (see the header of each file for the commit). Training your own adapter: [cheatsheet](https://github.com/scrya-com/lot-diffusion/blob/main/lot/CHEATSHEET.md).
 
+## MPEG-Diffusion (two-track) — research
+
+The pass from [MPEG-Diffusion](https://arxiv.org/abs/2611.12069): the whole frame denoises at half resolution, then one region finishes at full resolution. **MiniMax H3 MPEG Diffusion** runs that on the base DiT. There is no two-track LoRA yet, so a face is only as sharp as the half-resolution track. This is how you test the pass.
+
+Weights: [johndpope/MiniMax-H3-MPEG-Diffusion](https://huggingface.co/johndpope/MiniMax-H3-MPEG-Diffusion) `region_head_v3/` (MiniMax H3 Community License, **not for use in the EU, UK, South Korea or the USA**). Switch timing: [mpeg-diffusion issue #5](https://github.com/scrya-com/mpeg-diffusion/issues/5).
+
+```bash
+hf download johndpope/MiniMax-H3-MPEG-Diffusion region_head_v3/region_head_tt.safetensors --local-dir /tmp/mpeg
+mkdir -p ComfyUI/models/lot
+cp /tmp/mpeg/region_head_v3/region_head_tt.safetensors ComfyUI/models/lot/region_head_v3.safetensors
+```
+
+Restart ComfyUI and load `workflows/mpeg_diffusion_api.json` (API format: drop it on the canvas or POST it to `/prompt`).
+
+1. The workflow defaults `region` to `box`, a rectangle, so the pass runs before the head file is installed.
+2. After the download, set **region** to `region_head_v3.safetensors` and queue again.
+3. **VAE Decode** the `latent` output with the same image VAE. The `region` output is white where the full-resolution tokens were. The console prints the region share.
+4. Default switch is **16 of 20** (`hr_steps` 6). That is noise 0.80 on H3's shift 12. Step 10 is still noise 0.94 and the head guesses the centre.
+
+The prompt in the workflow is the off-centre check: a mansion interior, the woman at the right edge. With the v3 head she should be inside the white region. The box will not find her.
+
 ## License
 
 Apache-2.0. MiniMax H3 weights follow MiniMax’s terms. Image VAE: Mamad8 /

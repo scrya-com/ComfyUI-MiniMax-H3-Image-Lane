@@ -20,6 +20,7 @@ from comfy_extras.nodes_minimax_h3 import (
 import nodes
 
 from .lot_nodes import LOT_NODES
+from .mpeg_nodes import MPEG_NODES
 
 
 def align_frame_count_t1(n):
@@ -172,6 +173,7 @@ class MiniMaxH3ImageLaneExtension(ComfyExtension):
             MiniMaxH3ImageToImage,
             MiniMaxH3ReferenceToImage,
             *LOT_NODES,
+            *MPEG_NODES,
         ]
 
 
