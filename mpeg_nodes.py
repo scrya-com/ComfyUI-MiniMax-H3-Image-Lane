@@ -386,6 +386,56 @@ def _vae_upscale(vae, latent: torch.Tensor) -> torch.Tensor:
     return encoded
 
 
+def _paste_weight(mask: torch.Tensor, feather: float) -> torch.Tensor:
+    """Token mask (T, h, w) -> ``(T, 1, H, W)`` blend weight on the full-resolution latent grid (inside-only ramp)."""
+    weight = mask.detach().float().reshape(-1, *mask.shape[-2:])
+    weight = weight.repeat_interleave(4, -2).repeat_interleave(4, -1)[:, None]
+    radius = int(round(feather))
+    if radius > 1:
+        level, total = weight, weight.clone()
+        for _ in range(radius - 1):
+            level = -F.max_pool2d(-level, 3, stride=1, padding=1)
+            total = total + level
+        weight = total / radius
+    return weight
+
+
+def _decode_frames(vae, latent: torch.Tensor) -> torch.Tensor:
+    """Comfy VAE decode -> ``(F, H, W, 3)`` in [0, 1] on the CPU (a still keeps one frame)."""
+    pixels = vae.decode(latent)
+    pixels = pixels.reshape(-1, *pixels.shape[-3:])
+    if latent.shape[2] == 1:
+        pixels = pixels[:1]
+    return pixels.float().cpu()
+
+
+def _pixel_compose(vae, mask: torch.Tensor, hr: torch.Tensor, lr: torch.Tensor, feather: float,
+                   chunk: int = 16) -> tuple[torch.Tensor, torch.Tensor]:
+    """No VAE round trip at the end: decode HR (outside M filled with a latent x2 of LR, so the decoder sees a
+    plausible neighbourhood) and LR at half size, bicubic x2 the LR frames, paste in pixel space.
+    Returns (IMAGE ``(F, H, W, 3)``, the HR-filled latent)."""
+    inside = _paste_weight(mask, 0.0).permute(1, 0, 2, 3)[None].to(hr.device, hr.dtype)     # hard M, (1,1,T,H,W)
+    context = F.interpolate(lr.float(), scale_factor=(1, 2, 2), mode="trilinear", align_corners=False).to(hr.dtype)
+    filled = inside * hr + (1.0 - inside) * context
+    hr_px = _decode_frames(vae, filled)
+    lr_px = _decode_frames(vae, lr)
+    spans = [count for k in range(lr.shape[2]) for count in [FRAME_PER_TOKEN[k % 5]]]
+    frame_of = [k for k, count in enumerate(spans) for _ in range(count)]
+    frame_of = (frame_of + [frame_of[-1]] * hr_px.shape[0])[:hr_px.shape[0]]
+    weight = _paste_weight(mask, feather)[:, 0]                                                # (T, H, W)
+    out = torch.empty_like(hr_px)
+    device = comfy.model_management.get_torch_device()
+    for start in range(0, hr_px.shape[0], chunk):
+        stop = min(hr_px.shape[0], start + chunk)
+        lo = lr_px[start:stop].to(device).movedim(-1, 1)
+        up = F.interpolate(lo, size=hr_px.shape[1:3], mode="bicubic", align_corners=False).clamp(0, 1)
+        w = F.interpolate(weight[frame_of[start:stop]][:, None].to(device), size=hr_px.shape[1:3], mode="bilinear",
+                          align_corners=False)
+        hi = hr_px[start:stop].to(device).movedim(-1, 1)
+        out[start:stop] = (w * hi + (1.0 - w) * up).movedim(1, -1).cpu()
+    return out, filled
+
+
 def _paste(mask: torch.Tensor, hr: torch.Tensor, lr_up: torch.Tensor, feather: float) -> torch.Tensor:
     # Token mask (T, h, w) -> full-resolution latent grid, one single-channel map per frame ``(T, 1, H, W)``.
     weight = mask.detach().float().reshape(-1, *mask.shape[-2:])
@@ -424,7 +474,9 @@ def _euler(x, velocity, sigma, sigma_next):
 
 
 def sample_mpeg(model_patcher, positive, vae, *, width, height, steps, switch, hr_steps, seed, alpha, feather,
-                region_name, box, frames: int = 1, maps_name: str = "none", crop_switch: bool = True):
+                region_name, box, frames: int = 1, maps_name: str = "none", crop_switch: bool = True,
+                pixel_out: bool = False):
+    """Returns ``(latent, mask, share, images)``. ``images`` is None unless ``pixel_out``."""
     if width % 64 or height % 64:
         raise ValueError("width and height must be multiples of 64")
     if not 1 <= switch <= steps:
@@ -479,7 +531,7 @@ def sample_mpeg(model_patcher, positive, vae, *, width, height, steps, switch, h
             lr, _x0 = _euler(lr, velocity, sigma, sigma_next)
         comfy.model_management.unload_all_models()
         full = _vae_upscale(vae, lr)
-        return full, mask, share
+        return full, mask, share, (_decode_frames(vae, full) if pixel_out else None)
 
     plan = _Plan(mask)
     sigma = float(sigmas[switch])
@@ -504,9 +556,12 @@ def sample_mpeg(model_patcher, positive, vae, *, width, height, steps, switch, h
         hr, _x0 = _euler(hr, v_hr, sigma, sigma_next)
         bar.update(1)
     comfy.model_management.unload_all_models()
+    if pixel_out:
+        images, filled = _pixel_compose(vae, mask, hr, lr, feather)
+        return filled, mask, share, images
     lr_up = _vae_upscale(vae, lr)
     latent = _paste(mask, hr, lr_up.to(hr.device), feather)
-    return latent, mask, share
+    return latent, mask, share, None
 
 
 def _crop_box(mask: torch.Tensor, lat_h: int, lat_w: int, margin: int = 2):
@@ -555,7 +610,7 @@ class MiniMaxH3MpegDiffusion(io.ComfyNode):
                 io.Vae.Input("vae", tooltip="Same VAE you will decode with. It upscales the LR latent at the switch."),
                 io.Int.Input("width", default=1344, min=64, max=4096, step=64),
                 io.Int.Input("height", default=768, min=64, max=4096, step=64),
-                io.Int.Input("frames", default=1, min=1, max=241,
+                io.Int.Input("frames", default=1, min=1, max=481,
                              tooltip="Pixel frames. 1 is a still; 22 is a 7-latent-frame clip (snapped to 17n+5)."),
                 io.Int.Input("steps", default=20, min=2, max=50),
                 io.Int.Input("switch", default=16, min=1, max=49,
@@ -563,6 +618,10 @@ class MiniMaxH3MpegDiffusion(io.ComfyNode):
                 io.Int.Input("hr_steps", default=6, min=0, max=20,
                              tooltip="Steps after the switch, linear in sigma. 0 keeps the leftover schedule steps."),
                 io.Int.Input("seed", default=0, min=0, max=2**31 - 1),
+                io.Combo.Input("output", options=["latent", "pixels"], default="latent",
+                               tooltip="pixels: decode here and paste in pixel space (no VAE round trip of the whole clip; "
+                                       "much faster for long clips). Use the images output; the latent output is then "
+                                       "softer outside the region. latent: paste in latent space, then VAE Decode."),
                 io.Combo.Input("maps", options=_maps_options(), default="none",
                                tooltip="Fitted f_up K/V maps (up_maps_tt.pt from fit-kv) in models/lot. Without them the "
                                        "full-resolution region has a diamond-grid grain."),
@@ -580,20 +639,23 @@ class MiniMaxH3MpegDiffusion(io.ComfyNode):
             outputs=[
                 io.Latent.Output(display_name="latent"),
                 io.Image.Output(display_name="region"),
+                io.Image.Output(display_name="images"),
             ],
         )
 
     @classmethod
-    def execute(cls, model, positive, vae, width, height, frames, steps, switch, hr_steps, seed, maps, region,
+    def execute(cls, model, positive, vae, width, height, frames, steps, switch, hr_steps, seed, output, maps, region,
                 box_x0, box_y0, box_x1, box_y1, alpha, feather) -> io.NodeOutput:
-        latent, mask, share = sample_mpeg(
+        latent, mask, share, images = sample_mpeg(
             model, positive, vae, width=width, height=height, steps=steps, switch=switch, hr_steps=hr_steps,
             seed=seed, alpha=alpha, feather=feather, region_name=region, box=(box_x0, box_y0, box_x1, box_y1),
-            frames=frames, maps_name=maps)
+            frames=frames, maps_name=maps, pixel_out=output == "pixels")
         pixels = mask.float().reshape(-1, *mask.shape[-2:]).repeat_interleave(64, -2).repeat_interleave(64, -1)
         image = pixels[..., None].expand(-1, -1, -1, 3).clamp(0, 1).cpu()      # one region image per latent frame
         log.info("MPEG-Diffusion done region_share=%.3f latent=%s", share, tuple(latent.shape))
-        return io.NodeOutput({"samples": latent.cpu()}, image)
+        if images is None:
+            images = torch.zeros(1, 64, 64, 3)                  # output=latent: decode the latent with VAE Decode
+        return io.NodeOutput({"samples": latent.cpu()}, image, images)
 
 
 MPEG_NODES = [MiniMaxH3MpegDiffusion]
