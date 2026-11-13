@@ -169,6 +169,39 @@ def _load_head(name: str):
     return weight, bias, block
 
 
+def _load_maps(name: str):
+    """Fitted ``f_up`` maps (``two_track_h3.py fit-kv``): ``{(layer, "k"|"v"): (down (d, r), up (r, 4 d))}``.
+
+    Reads the repo's ``up_maps_tt.pt`` (tensors only, ``weights_only``) or a ``.safetensors`` with the
+    same ``down.l{layer}_2x2_{k|v}`` / ``up.…`` keys."""
+    path = folder_paths.get_full_path_or_raise("lot", name)
+    if path.endswith(".safetensors"):
+        from safetensors.torch import load_file
+
+        state = load_file(path)
+    else:
+        state = torch.load(path, map_location="cpu", weights_only=True)["state"]
+    maps = {}
+    for key, tensor in state.items():
+        part, name_ = key.split(".", 1)                       # "down" / "up", "l12_2x2_k"
+        layer, extent, which = name_.split("_")
+        if extent != "2x2":
+            continue
+        maps.setdefault((int(layer[1:]), which), {})[part] = tensor
+    if not maps:
+        raise ValueError(f"{name} holds no 2x2 K/V maps")
+    return {k: (v["down"], v["up"]) for k, v in maps.items()}
+
+
+def _expand(rows: torch.Tensor, pair, cells: int) -> torch.Tensor:
+    """``(N, H, d)`` LR keys or values -> ``(N * cells, H, d)``: copy plus the fitted rank-r delta, cells row-major."""
+    down, up = pair
+    count, heads, dim = rows.shape
+    delta = (rows @ down.to(rows.device, rows.dtype)) @ up.to(rows.device, rows.dtype)    # (N, H, cells * d)
+    delta = delta.reshape(count, heads, cells, dim).transpose(1, 2)                        # (N, cells, H, d)
+    return (rows.unsqueeze(1) + delta).reshape(count * cells, heads, dim)
+
+
 def _score(states: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     normed = F.layer_norm(states.float(), (states.shape[-1],))
     return F.linear(normed, weight.float().to(normed.device), bias.float().to(normed.device)).squeeze(-1)
@@ -220,8 +253,9 @@ def _predict_lr(model, video, sigma: float, context, payload, generator, capture
     return -pred, states
 
 
-def _two_track_attention(attn, hidden, rope_freqs, *, plan, video_start, hr_table, transformer_options=None):
-    del transformer_options
+def _two_track_attention(attn, hidden, rope_freqs, *, plan, video_start, hr_table, transformer_options=None,
+                         maps=None):
+    layer = (transformer_options or {}).get("block_index")
     length = hidden.shape[0]
     heads, dim = attn.heads, attn.head_dim
     query, key, value = attn.qkv_proj(hidden).split(heads * dim, dim=-1)
@@ -229,8 +263,8 @@ def _two_track_attention(attn, hidden, rope_freqs, *, plan, video_start, hr_tabl
     key = attn.k_norm(key.view(length, heads, dim))
     value = value.view(length, heads, dim)
     query_r = _rope(query, rope_freqs).to(value.dtype)
-    key_r = _rope(key, rope_freqs).to(value.dtype)
     split = video_start + plan.lr_count
+    key_r = _rope(key, rope_freqs).to(value.dtype)
     output = hidden.new_zeros(length, heads * dim)
     output[:split] = _sdpa(query_r[:split], key_r[:split], value[:split])
     if plan.hr_count:
@@ -238,8 +272,13 @@ def _two_track_attention(attn, hidden, rope_freqs, *, plan, video_start, hr_tabl
         # Grid keys are pre-RoPE. The HR cells are rotated at the full-resolution positions afterwards.
         lr_key = key[video_start:split]
         lr_value = value[video_start:split]
-        grid_key = lr_key.repeat_interleave(cells, dim=0)[plan.cell_order]
-        grid_value = lr_value.repeat_interleave(cells, dim=0)[plan.cell_order]
+        if maps is not None and layer is not None and (layer, "k") in maps:
+            # Fitted f_up: without it an HR query sees each LR key copied to 4 cells, a diamond-grid grain.
+            grid_key = _expand(lr_key, maps[(layer, "k")], cells)[plan.cell_order]
+            grid_value = _expand(lr_value, maps[(layer, "v")], cells)[plan.cell_order]
+        else:
+            grid_key = lr_key.repeat_interleave(cells, dim=0)[plan.cell_order]
+            grid_value = lr_value.repeat_interleave(cells, dim=0)[plan.cell_order]
         grid_key = grid_key.index_copy(0, plan.hr_index, key[split:])
         grid_value = grid_value.index_copy(0, plan.hr_index, value[split:])
         grid_key = _rope(grid_key, hr_table).to(value.dtype)
@@ -249,7 +288,7 @@ def _two_track_attention(attn, hidden, rope_freqs, *, plan, video_start, hr_tabl
     return attn.out_proj(output)
 
 
-def _predict_pair(model, lr, hr, plan, sigma: float, context, payload, generator):
+def _predict_pair(model, lr, hr, plan, sigma: float, context, payload, generator, maps=None):
     """Velocities ``(v_lr, v_hr)`` of one two-track step. ``v_hr`` is zero outside the region."""
     device = lr.device
     dtype = context.dtype
@@ -308,13 +347,13 @@ def _predict_pair(model, lr, hr, plan, sigma: float, context, payload, generator
 
     def attention(h, rope_freqs=None, transformer_options=None, attn=None):
         return _two_track_attention(attn, h, rope_freqs, plan=plan, video_start=video_start, hr_table=hr_table,
-                                    transformer_options=transformer_options)
+                                    transformer_options=transformer_options, maps=maps)
 
     for index, block in enumerate(model.blocks):
         comfy.model_management.throw_exception_if_processing_interrupted()
         hidden = block(hidden, t_emb, mod_segments, rope, transformer_options={"block_index": index},
-                       attention=lambda h, rope_freqs=None, transformer_options=None, block=block: attention(
-                           h, rope_freqs, transformer_options, block.attn))
+                       attention=lambda h, rope_freqs=None, transformer_options=None, block=block, index=index:
+                       attention(h, rope_freqs, {**(transformer_options or {}), "block_index": index}, block.attn))
 
     final = model.final_layer
     if final.video_out.weight.shape[0] != final.video_dim:
@@ -385,7 +424,7 @@ def _euler(x, velocity, sigma, sigma_next):
 
 
 def sample_mpeg(model_patcher, positive, vae, *, width, height, steps, switch, hr_steps, seed, alpha, feather,
-                region_name, box, frames: int = 1):
+                region_name, box, frames: int = 1, maps_name: str = "none", crop_switch: bool = True):
     if width % 64 or height % 64:
         raise ValueError("width and height must be multiples of 64")
     if not 1 <= switch <= steps:
@@ -445,7 +484,13 @@ def sample_mpeg(model_patcher, positive, vae, *, width, height, steps, switch, h
     plan = _Plan(mask)
     sigma = float(sigmas[switch])
     comfy.model_management.unload_all_models()
-    up = _vae_upscale(vae, x0)
+    up = F.interpolate(x0.float(), scale_factor=(1, 2, 2), mode="trilinear", align_corners=False)
+    crop = _crop_box(mask, lat_h, lat_w) if crop_switch else (0, lat_h, 0, lat_w)
+    if crop is not None:
+        # The HR track only reads the upscale inside M: round-trip M's bounding box (plus a margin) through the VAE.
+        y0, y1, x0_, x1 = crop
+        up[..., 2 * y0:2 * y1, 2 * x0_:2 * x1] = _vae_upscale(vae, x0[..., y0:y1, x0_:x1].contiguous()).to(up)
+    maps = _load_maps(maps_name) if maps_name and maps_name != "none" else None
     comfy.model_management.load_models_gpu([model_patcher])
     hr_gen = torch.Generator(device=device).manual_seed(seed + 2)
     hr = (1.0 - sigma) * up.to(device) + sigma * torch.randn(1, 24, latent_t, lat_h * 2, lat_w * 2, device=device,
@@ -454,7 +499,7 @@ def sample_mpeg(model_patcher, positive, vae, *, width, height, steps, switch, h
     for index in range(len(tail) - 1):
         comfy.model_management.throw_exception_if_processing_interrupted()
         sigma, sigma_next = float(tail[index]), float(tail[index + 1])
-        v_lr, v_hr = _predict_pair(dm, lr, hr, plan, sigma, context, payload, audio_gen)
+        v_lr, v_hr = _predict_pair(dm, lr, hr, plan, sigma, context, payload, audio_gen, maps)
         lr, _x0 = _euler(lr, v_lr, sigma, sigma_next)
         hr, _x0 = _euler(hr, v_hr, sigma, sigma_next)
         bar.update(1)
@@ -462,6 +507,27 @@ def sample_mpeg(model_patcher, positive, vae, *, width, height, steps, switch, h
     lr_up = _vae_upscale(vae, lr)
     latent = _paste(mask, hr, lr_up.to(hr.device), feather)
     return latent, mask, share
+
+
+def _crop_box(mask: torch.Tensor, lat_h: int, lat_w: int, margin: int = 2):
+    """Union over frames of M's bounding box on the LR latent grid (one LR token = 2 latent px), plus a margin,
+    even-sided, as (y0, y1, x0, x1); None for an empty mask."""
+    rows = torch.nonzero(mask.any(0).any(1)).flatten()
+    cols = torch.nonzero(mask.any(0).any(0)).flatten()
+    if not len(rows):
+        return None
+    y0, y1 = max(0, 2 * int(rows[0]) - margin), min(lat_h, 2 * int(rows[-1]) + 2 + margin)
+    x0, x1 = max(0, 2 * int(cols[0]) - margin), min(lat_w, 2 * int(cols[-1]) + 2 + margin)
+    return y0 - y0 % 2, min(lat_h, y1 + y1 % 2), x0 - x0 % 2, min(lat_w, x1 + x1 % 2)
+
+
+def _maps_options():
+    names = ["none"]
+    try:
+        names += [name for name in folder_paths.get_filename_list("lot") if "map" in name.lower()]
+    except Exception:
+        pass
+    return names
 
 
 def _region_options():
@@ -497,6 +563,9 @@ class MiniMaxH3MpegDiffusion(io.ComfyNode):
                 io.Int.Input("hr_steps", default=6, min=0, max=20,
                              tooltip="Steps after the switch, linear in sigma. 0 keeps the leftover schedule steps."),
                 io.Int.Input("seed", default=0, min=0, max=2**31 - 1),
+                io.Combo.Input("maps", options=_maps_options(), default="none",
+                               tooltip="Fitted f_up K/V maps (up_maps_tt.pt from fit-kv) in models/lot. Without them the "
+                                       "full-resolution region has a diamond-grid grain."),
                 io.Combo.Input("region", options=_region_options(), default="box",
                                tooltip="box uses the coordinates below. A region_head*.safetensors file scores the subject."),
                 io.Float.Input("box_x0", default=0.25, min=0.0, max=1.0, step=0.01),
@@ -515,12 +584,12 @@ class MiniMaxH3MpegDiffusion(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model, positive, vae, width, height, frames, steps, switch, hr_steps, seed, region,
+    def execute(cls, model, positive, vae, width, height, frames, steps, switch, hr_steps, seed, maps, region,
                 box_x0, box_y0, box_x1, box_y1, alpha, feather) -> io.NodeOutput:
         latent, mask, share = sample_mpeg(
             model, positive, vae, width=width, height=height, steps=steps, switch=switch, hr_steps=hr_steps,
             seed=seed, alpha=alpha, feather=feather, region_name=region, box=(box_x0, box_y0, box_x1, box_y1),
-            frames=frames)
+            frames=frames, maps_name=maps)
         pixels = mask.float().reshape(-1, *mask.shape[-2:]).repeat_interleave(64, -2).repeat_interleave(64, -1)
         image = pixels[..., None].expand(-1, -1, -1, 3).clamp(0, 1).cpu()      # one region image per latent frame
         log.info("MPEG-Diffusion done region_share=%.3f latent=%s", share, tuple(latent.shape))
