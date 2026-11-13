@@ -29,8 +29,14 @@
   "4": {
     "class_type": "MiniMaxH3ImageToImage",
     "inputs": {
-      "clip": ["2", 0],
-      "vae": ["3", 0],
+      "clip": [
+        "2",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
       "prompt": "A photorealistic 3D isometric view of a luxurious Hollywood mansion interior with an Asian supermodel posing.",
       "width": 1344,
       "height": 768
@@ -42,9 +48,18 @@
   "5": {
     "class_type": "MiniMaxH3MpegDiffusion",
     "inputs": {
-      "model": ["1", 0],
-      "positive": ["4", 0],
-      "vae": ["3", 0],
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "4",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
       "width": 1344,
       "height": 768,
       "steps": 20,
@@ -57,7 +72,9 @@
       "box_x1": 0.75,
       "box_y1": 0.9,
       "alpha": 0.5,
-      "feather": 4.0
+      "feather": 4.0,
+      "frames": 1,
+      "maps": "up_maps_tt.safetensors"
     },
     "_meta": {
       "title": "Diffusion pass. Set region to region_head_v3.safetensors after you download it into models/lot and restart."
@@ -66,21 +83,33 @@
   "6": {
     "class_type": "VAEDecode",
     "inputs": {
-      "samples": ["5", 0],
-      "vae": ["3", 0]
+      "samples": [
+        "5",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
     }
   },
   "7": {
     "class_type": "SaveImage",
     "inputs": {
-      "images": ["6", 0],
+      "images": [
+        "6",
+        0
+      ],
       "filename_prefix": "mpeg_diffusion"
     }
   },
   "8": {
     "class_type": "SaveImage",
     "inputs": {
-      "images": ["5", 1],
+      "images": [
+        "5",
+        1
+      ],
       "filename_prefix": "mpeg_region"
     },
     "_meta": {

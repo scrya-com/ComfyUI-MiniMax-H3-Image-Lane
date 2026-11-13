@@ -133,24 +133,37 @@ Limits: no partial denoise (start from empty noise), no denoise masks (those ste
 
 ## MPEG-Diffusion (two-track) — research
 
-The pass from [MPEG-Diffusion](https://arxiv.org/abs/2611.12069): the whole frame denoises at half resolution, then one region finishes at full resolution. **MiniMax H3 MPEG Diffusion** runs that on the base DiT. There is no two-track LoRA yet, so a face is only as sharp as the half-resolution track. This is how you test the pass.
+The pass from [MPEG-Diffusion](https://arxiv.org/abs/2611.12069): the whole frame denoises at half resolution, then
+one region finishes at full resolution. **MiniMax H3 MPEG Diffusion** runs that on the base DiT, for stills and video.
 
-Weights: [johndpope/MiniMax-H3-MPEG-Diffusion](https://huggingface.co/johndpope/MiniMax-H3-MPEG-Diffusion) `region_head_v3/` (MiniMax H3 Community License, **not for use in the EU, UK, South Korea or the USA**). Switch timing: [mpeg-diffusion issue #5](https://github.com/scrya-com/mpeg-diffusion/issues/5).
+With the fitted K/V maps and region head v3 no DiT fine-tune is needed. The node gave sharp subjects on a 22-frame
+1344×768 clip in this ComfyUI: 51 s for the whole workflow including model loading, text encoding and decode, on an
+RTX 5090. In the mpeg-diffusion repo the same pass samples 1.94× faster than full resolution.
+
+Weights: [johndpope/MiniMax-H3-MPEG-Diffusion](https://huggingface.co/johndpope/MiniMax-H3-MPEG-Diffusion),
+`kv_maps/` and `region_head_v3/`. They are under the MiniMax H3 Community License: **not for use in the EU, UK, South
+Korea or the USA**.
 
 ```bash
-hf download johndpope/MiniMax-H3-MPEG-Diffusion region_head_v3/region_head_tt.safetensors --local-dir /tmp/mpeg
+hf download johndpope/MiniMax-H3-MPEG-Diffusion kv_maps/up_maps_tt.safetensors region_head_v3/region_head_tt.safetensors --local-dir /tmp/mpeg
 mkdir -p ComfyUI/models/lot
+cp /tmp/mpeg/kv_maps/up_maps_tt.safetensors ComfyUI/models/lot/up_maps_tt.safetensors
 cp /tmp/mpeg/region_head_v3/region_head_tt.safetensors ComfyUI/models/lot/region_head_v3.safetensors
 ```
 
-Restart ComfyUI and load `workflows/mpeg_diffusion_api.json` (API format: drop it on the canvas or POST it to `/prompt`).
+Restart ComfyUI and load a workflow (API format: drop it on the canvas or POST it to `/prompt`):
+- `workflows/mpeg_diffusion_video_api.json`: a 22-frame clip, the video VAE, maps and region head. It saves frames
+  under `output/mpeg_video/`.
+- `workflows/mpeg_diffusion_api.json`: a still.
 
-1. The workflow defaults `region` to `box`, a rectangle, so the pass runs before the head file is installed.
-2. After the download, set **region** to `region_head_v3.safetensors` and queue again.
-3. **VAE Decode** the `latent` output with the same image VAE. The `region` output is white where the full-resolution tokens were. The console prints the region share.
-4. Default switch is **16 of 20** (`hr_steps` 6). That is noise 0.80 on H3's shift 12. Step 10 is still noise 0.94 and the head guesses the centre.
-
-The prompt in the workflow is the off-centre check: a mansion interior, the woman at the right edge. With the v3 head she should be inside the white region. The box will not find her.
+Inputs:
+1. **maps**: `up_maps_tt.safetensors`. With `none`, the full-resolution region has a diamond-grid grain, and more
+   steps do not remove it.
+2. **region**: `region_head_v3.safetensors` finds the subject. `box` is a fixed rectangle.
+3. **frames**: 1 is a still; 22 is 7 latent frames (snapped to 17n+5). Decode with the video VAE for clips. The
+   `region` output is one image per latent frame, white where the full-resolution tokens were.
+4. **switch**: the default is 16 of 20 (`hr_steps` 6). The head reads at noise 0.80, and the full-resolution track
+   starts at 0.75.
 
 ## License
 

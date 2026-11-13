@@ -1,0 +1,119 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "H3 FL2VA DiT (base; the two-track LoRA is not trained)"
+    }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "_meta": {
+      "title": "Image VAE. Same file on the MPEG node and on VAE Decode."
+    }
+  },
+  "4": {
+    "class_type": "MiniMaxH3ImageToImage",
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "prompt": "A mother and her young daughter laughing together on a cream sofa in a bright living room, soft window light, candid lifestyle video.",
+      "width": 1344,
+      "height": 768
+    },
+    "_meta": {
+      "title": "Prompt only. The latent this node makes is not used."
+    }
+  },
+  "5": {
+    "class_type": "MiniMaxH3MpegDiffusion",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "4",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "width": 1344,
+      "height": 768,
+      "steps": 20,
+      "switch": 16,
+      "hr_steps": 6,
+      "seed": 1,
+      "region": "region_head_v3.safetensors",
+      "box_x0": 0.25,
+      "box_y0": 0.2,
+      "box_x1": 0.75,
+      "box_y1": 0.9,
+      "alpha": 0.5,
+      "feather": 4.0,
+      "frames": 22,
+      "maps": "up_maps_tt.safetensors"
+    },
+    "_meta": {
+      "title": "Diffusion pass. Set region to region_head_v3.safetensors after you download it into models/lot and restart."
+    }
+  },
+  "6": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "5",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    }
+  },
+  "7": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "6",
+        0
+      ],
+      "filename_prefix": "mpeg_video/frame"
+    }
+  },
+  "8": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "5",
+        1
+      ],
+      "filename_prefix": "mpeg_video/region"
+    },
+    "_meta": {
+      "title": "White = the tokens that ran at full resolution"
+    }
+  }
+}
